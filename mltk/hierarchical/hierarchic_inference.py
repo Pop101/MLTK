@@ -12,13 +12,13 @@ from typing import Hashable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from mltk.hierarchic_dataset import (
+from mltk.hierarchical.hierarchic_dataset import (
     HierarchicDataset,
     HierarchyInformation,
     LevelPath,
 )
-from mltk.model_factory import ModelFactory
-from mltk.supermodel import SuperModel
+from mltk.models.model_factory import ModelFactory
+from mltk.models.supermodel import SuperModel
 
 
 @dataclass

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mltk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Small PyTorch toolkit for hierarchical / frozen-feature classifiers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,8 +30,8 @@ test = [
     "torchvision>=0.19",
 ]
 
-[tool.setuptools]
-packages = ["mltk"]
+[tool.setuptools.packages.find]
+include = ["mltk*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

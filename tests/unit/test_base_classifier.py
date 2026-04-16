@@ -79,7 +79,7 @@ def test_save_is_atomic_on_interrupt_simulation(monkeypatch):
             real_save(state, target)  # write the .tmp fully
             raise RuntimeError("simulated crash before rename")
 
-        monkeypatch.setattr("mltk.base_classifier.torch.save", kaboom)
+        monkeypatch.setattr("mltk.learning.base_classifier.torch.save", kaboom)
         try:
             m.save(path)
         except RuntimeError:

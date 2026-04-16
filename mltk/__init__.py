@@ -1,58 +1,83 @@
 """MLTK — a small PyTorch toolkit for hierarchical / frozen-feature classifiers.
 
-Everything that is not specific to any one domain (geolocation, NLP, …) lives
-here. The downstream project imports these building blocks and layers its own
-domain-specific training loss and dataset on top.
+Layout:
+    mltk.learning         — training lifecycle: classifier base, losses,
+                            schedulers, samplers
+    mltk.building_blocks  — reusable nn.Module primitives: MLP blocks,
+                            attention-augmented MLP, classifier heads,
+                            gradient-checkpointed Sequential
+    mltk.models           — composed architectures: SuperModel, model
+                            factories, frozen vision backbone loader
+    mltk.hierarchical     — tree-structured dispatch: HierarchyInformation,
+                            HierarchicDataset, beam-search inference
 
-Namespaces are kept flat on purpose — one module per concept, so a grep for
-``from mltk.foo import Bar`` finds everything there is.
+Everything important is also re-exported at the top level so short imports
+work:
+
+    from mltk import AbstractClassifier, SuperModel, SmoothReduceLROnPlateau
 """
-from mltk.base_classifier import AbstractClassifier
-from mltk.supermodel import SuperModel
-from mltk.hierarchic_dataset import (
+from mltk.learning import (
+    AbstractClassifier,
+    KLDivLossWithSoftmax,
+    SmoothReduceLROnPlateau,
+    create_sqrt_sampler,
+)
+from mltk.building_blocks import (
+    CheckpointedSequential,
+    CosineClassifier,
+    FeaturePerspective,
+    SwiGLU,
+    DropPath,
+    LayerScale,
+    ModernMLPBlock,
+    SkipAttentionMLP,
+)
+from mltk.models import (
+    SuperModel,
+    ModelFactory,
+    SkipAttentionMLPFactory,
+    BackboneSpec,
+    load_backbone,
+)
+from mltk.hierarchical import (
     HierarchyInformation,
     HierarchicDataset,
     PerLevelSampler,
     LevelPath,
     LeafPath,
+    HierarchicInference,
+    BeamCandidate,
 )
-from mltk.hierarchic_inference import HierarchicInference, BeamCandidate
-from mltk.model_factory import ModelFactory, SkipAttentionMLPFactory
-from mltk.skipattnmlp import SkipAttentionMLP
-from mltk.feature_perspective import FeaturePerspective
-from mltk.mlp_blocks import SwiGLU, DropPath, LayerScale, ModernMLPBlock
-from mltk.checkpointedsequential import CheckpointedSequential
-from mltk.schedulers import SmoothReduceLROnPlateau
-from mltk.samplers import create_sqrt_sampler
-from mltk.kldivlosssoftmax import KLDivLossWithSoftmax
-from mltk.classifier_heads import CosineClassifier
-from mltk.backbones import BackboneSpec, load_backbone
 
 __all__ = [
+    # learning
     "AbstractClassifier",
-    "SuperModel",
-    "HierarchyInformation",
-    "HierarchicDataset",
-    "HierarchicInference",
-    "BeamCandidate",
-    "PerLevelSampler",
-    "LevelPath",
-    "LeafPath",
-    "ModelFactory",
-    "SkipAttentionMLPFactory",
-    "SkipAttentionMLP",
+    "KLDivLossWithSoftmax",
+    "SmoothReduceLROnPlateau",
+    "create_sqrt_sampler",
+    # building blocks
+    "CheckpointedSequential",
+    "CosineClassifier",
     "FeaturePerspective",
     "SwiGLU",
     "DropPath",
     "LayerScale",
     "ModernMLPBlock",
-    "CheckpointedSequential",
-    "SmoothReduceLROnPlateau",
-    "create_sqrt_sampler",
-    "KLDivLossWithSoftmax",
-    "CosineClassifier",
+    "SkipAttentionMLP",
+    # models
+    "SuperModel",
+    "ModelFactory",
+    "SkipAttentionMLPFactory",
     "BackboneSpec",
     "load_backbone",
+    # hierarchical
+    "HierarchyInformation",
+    "HierarchicDataset",
+    "PerLevelSampler",
+    "LevelPath",
+    "LeafPath",
+    "HierarchicInference",
+    "BeamCandidate",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

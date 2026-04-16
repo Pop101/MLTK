@@ -4,20 +4,39 @@ Small PyTorch toolkit extracted from the DoxAI geolocation project. The parts
 that aren't specific to any one domain live here so they can be reused without
 pulling in 5 GB of image data and a hierarchical Haversine loss.
 
-## What's inside
+## Layout
 
-| Concept | Module | Notes |
+```
+mltk/
+├── learning/          # training lifecycle: classifier base, losses,
+│                      #   schedulers, samplers
+├── building_blocks/   # reusable nn.Module primitives: MLP blocks,
+│                      #   attention-augmented MLP, classifier heads,
+│                      #   gradient-checkpointed Sequential
+├── models/            # composed architectures: SuperModel, model
+│                      #   factories, frozen vision backbone loader
+└── hierarchical/      # tree-structured dispatch: HierarchyInformation,
+                       #   HierarchicDataset, beam-search inference
+```
+
+Every important symbol is also re-exported at the top level (`from mltk import …`).
+
+| Where | Symbol | Notes |
 |---|---|---|
-| Base classifier lifecycle | `mltk.base_classifier.AbstractClassifier` | Save / load, optimizer + scheduler plumbing, atomic save |
-| Super model (dispatch over many heads) | `mltk.supermodel.SuperModel` | Heads created lazily by key, shared trunk optional |
-| Hierarchical dispatch + beam search inference | `mltk.hierarchic_inference.HierarchicInference` | Teacher-forced descent at train time, beam-search descent at eval |
-| Hierarchy metadata + per-level sampler | `mltk.hierarchic_dataset` | `HierarchyInformation`, `HierarchicDataset`, `PerLevelSampler` |
-| Blocks | `mltk.skipattnmlp.SkipAttentionMLP`, `mltk.feature_perspective.FeaturePerspective`, `mltk.mlp_blocks.*` | Attention-augmented MLP, SwiGLU MLP block, DropPath, LayerScale |
-| Heads | `mltk.classifier_heads.CosineClassifier` | Cosine-similarity classifier with learnable temperature |
-| Losses | `mltk.kldivlosssoftmax.KLDivLossWithSoftmax` | KL divergence over soft targets |
-| Schedulers | `mltk.schedulers.SmoothReduceLROnPlateau` | Smoothed plateau-LR |
-| Samplers | `mltk.samplers.create_sqrt_sampler`, `mltk.smart_samplers` | sqrt-weight sampler for imbalanced label distributions |
-| Frozen vision backbones | `mltk.backbones.load_backbone` | SigLIP / SigLIP2 (+ NaFlex) / CLIP / DINOv2 / DINOv3 / generic — one call returns a `BackboneSpec` with a forward fn, preprocessing mean/std, and feat dim |
+| `learning` | `AbstractClassifier` | Save/load, optimizer + scheduler plumbing, atomic save |
+| `learning` | `SmoothReduceLROnPlateau` | Plateau-aware LR schedule that smooths the loss history before deciding to drop |
+| `learning` | `KLDivLossWithSoftmax` | KL divergence over soft targets |
+| `learning` | `create_sqrt_sampler` | sqrt-weight sampler for imbalanced label distributions |
+| `building_blocks` | `SkipAttentionMLP` | Attention-augmented MLP with skip connections |
+| `building_blocks` | `FeaturePerspective` | Multi-activation feature transform |
+| `building_blocks` | `ModernMLPBlock`, `SwiGLU`, `DropPath`, `LayerScale` | Modern MLP primitives |
+| `building_blocks` | `CosineClassifier` | Cosine-similarity classifier head |
+| `building_blocks` | `CheckpointedSequential` | `nn.Sequential` with per-layer gradient checkpointing |
+| `models` | `SuperModel` | Shared trunk + lazy per-key heads. Heads are created on first `get_head(key)` |
+| `models` | `ModelFactory`, `SkipAttentionMLPFactory` | Factories for per-level head construction |
+| `models` | `BackboneSpec`, `load_backbone` | SigLIP / SigLIP2 (+ NaFlex) / CLIP / DINOv2 / DINOv3 / generic — one call returns forward fn + mean/std + feat dim |
+| `hierarchical` | `HierarchyInformation`, `HierarchicDataset`, `PerLevelSampler` | Tree metadata, per-level sampler that descends the tree |
+| `hierarchical` | `HierarchicInference`, `BeamCandidate` | Teacher-forced descent at train time, beam-search descent at eval |
 
 ## Install
 
@@ -96,12 +115,12 @@ pytest -m integration          # slow tests (iris + mnist)
 ```
 
 The integration suite trains two real models on common benchmarks so regressions
-in the core building blocks surface fast:
+in the core building blocks surface immediately:
 
-- **Iris** — a `SkipAttentionMLP` trained by a minimal `AbstractClassifier` subclass
-  to >90 % test accuracy in ~5 seconds on CPU.
-- **MNIST** — a `SuperModel` hierarchical classifier (parity / digit two-level
-  tree) trained on a small MNIST slice.
+- **Iris** — `SkipAttentionMLP` + `SmoothReduceLROnPlateau` through an `AbstractClassifier` subclass. **Must clear 97%** on a separable split (seed=0 / 20% test) where SVC ceilings at 100%. If it misses, the stack is broken.
+- **MNIST** — a `SuperModel` 2-level hierarchy (root → parity → digit) with a `SkipAttentionMLP` trunk and `SmoothReduceLROnPlateau`. **Must clear 95%** on a 20K/2K subset. A plain MLP hits ~97% here; anything below 95% means the scheduler, the head dispatch, or block composition is underperforming.
+
+Both tests also roundtrip the checkpoint through `save` / `load` and assert bit-exact evaluation after reload.
 
 ## License
 

@@ -23,7 +23,7 @@ from typing import Any, Dict, Hashable, Iterable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from mltk.base_classifier import AbstractClassifier
+from mltk.learning.base_classifier import AbstractClassifier
 
 
 class SuperModel(AbstractClassifier):

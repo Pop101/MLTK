@@ -20,9 +20,9 @@ from typing import Any, Dict, List, Optional
 
 import torch.nn as nn
 
-from mltk.classifier_heads import CosineClassifier
-from mltk.feature_perspective import FeaturePerspective
-from mltk.skipattnmlp import SkipAttentionMLP
+from mltk.building_blocks.classifier_heads import CosineClassifier
+from mltk.building_blocks.feature_perspective import FeaturePerspective
+from mltk.building_blocks.skipattnmlp import SkipAttentionMLP
 
 
 class ModelFactory(ABC):
