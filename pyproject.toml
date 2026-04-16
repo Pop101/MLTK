@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mltk"
+version = "0.1.0"
+description = "Small PyTorch toolkit for hierarchical / frozen-feature classifiers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "DoxAI contributors" }]
+
+dependencies = [
+    "torch>=2.4",
+    "numpy>=1.26",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+# Huggingface backbones (CLIP, SigLIP, DINO, …). Only needed if you import
+# `mltk.backbones`; the rest of the toolkit works without it.
+hf = [
+    "transformers>=4.44",
+    "pillow>=10.0",
+]
+test = [
+    "pytest>=8.0",
+    "scikit-learn>=1.4",
+    "torchvision>=0.19",
+]
+
+[tool.setuptools]
+packages = ["mltk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "integration: end-to-end tests that train a small model; slower.",
+    "gpu: tests that require a CUDA device.",
+]
