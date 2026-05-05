@@ -1,13 +1,13 @@
-"""Hierarchical-tree specialization of `SuperModel`.
+"""Hierarchical-tree specialization of ``SuperModel``.
 
 Adds tree-aware head construction (output dim derived from hierarchy
 children/leaf count) and beam-search descent inference. Training signal
-lives in subclasses (see `HierarchicGeoClassifier`).
+lives in subclasses.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Hashable, List, Optional, Tuple
+from typing import Callable, Hashable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,6 @@ from mltk.hierarchical.hierarchic_dataset import (
     HierarchyInformation,
     LevelPath,
 )
-from mltk.models.model_factory import ModelFactory
 from mltk.models.supermodel import SuperModel
 
 
@@ -38,13 +37,17 @@ def _coerce_path_to_tuple(path_like) -> Tuple:
     return tuple(None if v is None else int(v) for v in path_like)
 
 
+# Factory signature: (output_dim) -> nn.Module
+NodeHeadFactory = Callable[[int], nn.Module]
+
+
 class HierarchicInference(SuperModel):
     """Tree-structured classifier over precomputed features.
 
-    Heads are instantiated lazily per visited `LevelPath`. The output
+    Heads are instantiated lazily per visited ``LevelPath``. The output
     dimensionality of each head comes from the hierarchy (leaf size or
-    child count), so the caller only supplies a ModelFactory that knows
-    how to build an MLP given a target `output_dim`.
+    child count), so the caller only supplies a factory that takes
+    ``output_dim`` and returns a head module.
     """
 
     def __init__(
@@ -52,9 +55,7 @@ class HierarchicInference(SuperModel):
         hierarchical_structure,
         *,
         head_input_dim: int,
-        head_factory: ModelFactory,
-        device=None,
-        dtype=torch.float32,
+        head_factory: NodeHeadFactory,
     ):
         if hierarchical_structure is None:
             raise ValueError("hierarchical_structure must be provided")
@@ -68,16 +69,9 @@ class HierarchicInference(SuperModel):
                 f"got {type(hierarchical_structure)}"
             )
 
-        super().__init__(input_dim=head_input_dim, trunk=None, device=device, dtype=dtype)
+        super().__init__(input_dim=head_input_dim, trunk=None)
         self.hierarchy_information: HierarchyInformation = hierarchy_information
-        self._model_factory: ModelFactory = head_factory
-        # SuperModel stashed `input_dim` in init_params, but our __init__
-        # takes `head_input_dim`. Swap the key so `cls(**init_params)` works.
-        self.init_params.pop("input_dim", None)
-        self.init_params.update({
-            "hierarchical_structure": self.hierarchy_information.clone(),
-            "head_input_dim": head_input_dim,
-        })
+        self._node_head_factory = head_factory
 
     def _canonical_key(self, key: Hashable) -> Tuple:
         return _coerce_path_to_tuple(key)
@@ -91,7 +85,7 @@ class HierarchicInference(SuperModel):
             output_dim = len(info.get_children(key))
         if output_dim <= 0:
             raise ValueError(f"Level {key!r} has output_dim={output_dim}; cannot build a head.")
-        return self._model_factory.create_model(output_dim=output_dim)
+        return self._node_head_factory(output_dim)
 
     # ---- inference: beam-search descent ----
 
@@ -100,16 +94,16 @@ class HierarchicInference(SuperModel):
         feature: torch.Tensor,
         beam_size: int = 1,
     ) -> List[BeamCandidate]:
-        """Beam-search descent for a single [1, feat_dim] feature.
+        """Beam-search descent for a single ``[1, feat_dim]`` feature.
 
-        Returns up to `beam_size` `BeamCandidate`s sorted by log-prob
-        descending. Each terminal candidate has `leaf_logits` populated.
-        `beam_size=1` is exact greedy descent.
+        Returns up to ``beam_size`` ``BeamCandidate``s sorted by log-prob
+        descending. Each terminal candidate has ``leaf_logits`` populated.
+        ``beam_size=1`` is exact greedy descent.
         """
-        assert feature.dim() == 2 and feature.size(0) == 1, (
-            f"expects [1, feat_dim], got {tuple(feature.shape)}"
-        )
-        assert beam_size >= 1
+        if feature.dim() != 2 or feature.size(0) != 1:
+            raise ValueError(f"expects [1, feat_dim], got {tuple(feature.shape)}")
+        if beam_size < 1:
+            raise ValueError("beam_size must be >= 1")
         info = self.hierarchy_information
 
         beam: List[BeamCandidate] = [BeamCandidate(level_path=info.root_level())]
@@ -123,7 +117,6 @@ class HierarchicInference(SuperModel):
                 any_internal = True
                 children = info.get_children(cand.level_path)
                 log_probs = torch.log_softmax(self.get_head(cand.level_path)(feature), dim=-1)[0]
-                # Expand top-K children (K=beam_size capped at num_children).
                 topk = torch.topk(log_probs, k=min(beam_size, len(children)))
                 for lp, idx in zip(topk.values.tolist(), topk.indices.tolist()):
                     next_beam.append(
@@ -137,20 +130,19 @@ class HierarchicInference(SuperModel):
             if not any_internal:
                 break
 
-        # Populate leaf_logits for every terminal candidate.
         for cand in beam:
             if cand.leaf_logits is None:
                 cand.leaf_logits = self.get_head(cand.level_path)(feature)
         return beam
 
     def predict(self, image: torch.Tensor, beam_size: int = 1) -> torch.Tensor:
-        """Sparse [B, total_leaves] prediction via per-sample beam descent.
+        """Sparse ``[B, total_leaves]`` prediction via per-sample beam descent.
 
         Greedy mode drops each sample's leaf logits into its contiguous
         slice. Beam mode writes a softmax-weighted mixture across all
         terminal candidates.
         """
-        for head in self._heads.values():
+        for head in self.heads.values():
             head.eval()
         info = self.hierarchy_information
         if not info.leaf_offsets:

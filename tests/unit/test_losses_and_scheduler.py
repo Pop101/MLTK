@@ -2,6 +2,7 @@
 import torch
 
 from mltk import KLDivLossWithSoftmax, SmoothReduceLROnPlateau
+from mltk import CosineWarmupScheduler, EMAWeightTracker
 
 
 def test_kldiv_reaches_zero_when_distributions_match():
@@ -37,3 +38,30 @@ def test_smooth_plateau_reduces_lr_on_flat_losses():
         sched.step(1.0)
     final_lr = max(g["lr"] for g in opt.param_groups)
     assert final_lr < 1e-2, f"LR should have dropped; still {final_lr}"
+
+
+def test_custom_schedulers_follow_torch_scheduler_protocol():
+    model = torch.nn.Linear(2, 1)
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    sched = CosineWarmupScheduler(opt, warmup_steps=1, total_steps=4)
+
+    assert isinstance(sched, torch.optim.lr_scheduler.LRScheduler)
+    assert sched.interval == "step"
+    sched.step()
+    assert max(group["lr"] for group in opt.param_groups) <= 0.1
+
+
+def test_ema_weight_tracker_roundtrips_state():
+    """state_dict carries dynamic state only; config (decay/warmup_steps) is
+    owned by the constructor."""
+    model = torch.nn.Linear(2, 1)
+    ema = EMAWeightTracker(model.parameters(), decay=0.9, warmup_steps=0)
+    ema.update(model.parameters())
+    saved_updates = ema._num_updates
+
+    restored = EMAWeightTracker(model.parameters(), decay=0.9, warmup_steps=0)
+    restored.load_state_dict(ema.state_dict())
+
+    assert restored._num_updates == saved_updates
+    for live, src in zip(restored._shadow, ema._shadow):
+        torch.testing.assert_close(live, src)

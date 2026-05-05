@@ -1,12 +1,8 @@
-"""Composed architectures: SuperModel, model factories, vision backbones."""
+"""Composed architectures: SuperModel, head factory protocol."""
 from mltk.models.supermodel import SuperModel
-from mltk.models.model_factory import ModelFactory, SkipAttentionMLPFactory
-from mltk.models.backbones import BackboneSpec, load_backbone
+from mltk.models.model_factory import ModelFactory
 
 __all__ = [
     "SuperModel",
     "ModelFactory",
-    "SkipAttentionMLPFactory",
-    "BackboneSpec",
-    "load_backbone",
 ]

@@ -1,13 +1,17 @@
 """Feedback-driven samplers for class-imbalanced training.
 
-Extends `modules/samplers.py` (static weighting) with stateful samplers
-that adapt during training:
+Stateful samplers that adapt during training:
 
-    - `AdaptiveFrequencySampler` : target a class distribution and
-                                    online-correct for actually-seen drift.
-    - `LossAwareSampler`         : oversample classes with high recent loss.
+    - ``AdaptiveFrequencySampler`` : target a class distribution and
+                                     online-correct for actually-seen drift.
+    - ``LossAwareSampler``         : oversample classes with high recent loss.
 
 Task-agnostic; they operate on integer class labels.
+
+Target distributions are passed as **callables** (``Callable[[np.ndarray],
+np.ndarray]`` from class counts to per-class weights). Predefined choices
+live in ``mltk.learning.target_fns`` (``UNIFORM_TARGET``, ``SQRT_TARGET``,
+``LINEAR_TARGET``, ``LOG_TARGET``).
 
 References:
     HAR — Duggal et al., https://poloclub.github.io/papers/21-bigdata-har.pdf
@@ -23,34 +27,24 @@ import numpy as np
 from torch.utils.data import Sampler
 
 
-_TargetFn = Callable[[np.ndarray], np.ndarray]
+TargetFn = Callable[[np.ndarray], np.ndarray]
 
-
-def _resolve_target_fn(name_or_callable) -> _TargetFn:
-    """Map a target-distribution name to a class-weight function."""
-    if callable(name_or_callable):
-        return name_or_callable
-    name = name_or_callable.lower()
-    if name == "uniform":
-        return lambda counts: np.ones_like(counts, dtype=np.float64)
-    if name == "sqrt":
-        return lambda counts: 1.0 / np.sqrt(counts.astype(np.float64))
-    if name == "linear":
-        return lambda counts: 1.0 / counts.astype(np.float64)
-    if name == "log":
-        return lambda counts: 1.0 / np.log1p(counts.astype(np.float64))
-    raise ValueError(f"Unknown target_fn name: {name!r}")
+# Predefined target-distribution functions (class-count → per-class weight).
+UNIFORM_TARGET: TargetFn = lambda counts: np.ones_like(counts, dtype=np.float64)
+SQRT_TARGET: TargetFn = lambda counts: 1.0 / np.sqrt(counts.astype(np.float64))
+LINEAR_TARGET: TargetFn = lambda counts: 1.0 / counts.astype(np.float64)
+LOG_TARGET: TargetFn = lambda counts: 1.0 / np.log1p(counts.astype(np.float64))
 
 
 class AdaptiveSampler(Sampler[int], ABC):
     """Stateful Sampler base class with feedback hooks.
 
-    Protocol: the training loop constructs with `class_labels`, passes to
+    Protocol: the training loop constructs with ``class_labels``, passes to
     a DataLoader, then after every batch calls whichever of
-    `update_losses` / `update_frequencies` the concrete subclass consumes.
+    ``update_losses`` / ``update_frequencies`` the concrete subclass consumes.
 
-    Subclasses implement `_class_weights()` returning a [num_classes] array
-    of per-class weights (in the `self.unique_classes` order). The base
+    Subclasses implement ``_class_weights()`` returning a [num_classes] array
+    of per-class weights (in the ``self.unique_classes`` order). The base
     class handles distributing those to per-item weights and drawing
     indices.
     """
@@ -64,7 +58,8 @@ class AdaptiveSampler(Sampler[int], ABC):
         super().__init__(None)
         self.class_labels = np.asarray(class_labels, dtype=np.int64)
         self.num_items = len(self.class_labels)
-        assert self.num_items > 0, "class_labels is empty"
+        if self.num_items == 0:
+            raise ValueError("class_labels is empty")
         self.num_samples = int(num_samples) if num_samples is not None else self.num_items
         self._rng = np.random.default_rng(rng_seed)
 
@@ -80,7 +75,7 @@ class AdaptiveSampler(Sampler[int], ABC):
 
     @abstractmethod
     def _class_weights(self) -> np.ndarray:
-        """Return [num_classes] weights for this epoch, ordered by `unique_classes`."""
+        """Return [num_classes] weights for this epoch, ordered by ``unique_classes``."""
         ...
 
     def update_losses(self, class_ids: Sequence[int], losses: Sequence[float]) -> None:
@@ -93,8 +88,8 @@ class AdaptiveSampler(Sampler[int], ABC):
 
     def __iter__(self) -> Iterator[int]:
         class_weights = self._class_weights()
-        assert class_weights.shape == (self.num_classes,)
-        # Distribute each class's weight uniformly across its items.
+        if class_weights.shape != (self.num_classes,):
+            raise ValueError("_class_weights must return one weight per class")
         item_weights = np.empty(self.num_items, dtype=np.float64)
         for c, w in zip(self.unique_classes, class_weights):
             idxs = self._indices_by_class[c]
@@ -116,25 +111,26 @@ class AdaptiveFrequencySampler(AdaptiveSampler):
 
     Closes the loop on a static inverse-frequency sampler: tracks how many
     times each class has actually been drawn and rebuilds weights each
-    epoch to compensate for under/over-sampling. `correction_rate=0`
+    epoch to compensate for under/over-sampling. ``correction_rate=0``
     degenerates to a static sampler.
     """
 
     def __init__(
         self,
         class_labels: Sequence[int],
-        target_fn: "str | _TargetFn" = "sqrt",
+        target_fn: TargetFn = SQRT_TARGET,
         *,
         correction_rate: float = 0.5,
         num_samples: Optional[int] = None,
         rng_seed: int = 0,
     ):
         super().__init__(class_labels, num_samples=num_samples, rng_seed=rng_seed)
-        assert 0.0 <= correction_rate <= 1.0
+        if not 0.0 <= correction_rate <= 1.0:
+            raise ValueError("correction_rate must be in [0, 1]")
         self.correction_rate = float(correction_rate)
 
-        target = _resolve_target_fn(target_fn)(self._class_counts)
-        self._target = target / target.sum()  # [num_classes]
+        target = target_fn(self._class_counts)
+        self._target = target / target.sum()
         self._seen_counts = np.zeros(self.num_classes, dtype=np.int64)
 
     def update_frequencies(self, class_ids: Sequence[int]) -> None:
@@ -149,7 +145,6 @@ class AdaptiveFrequencySampler(AdaptiveSampler):
             return self._target
         total_seen = max(1, int(self._seen_counts.sum()))
         seen_frac = self._seen_counts / total_seen
-        # ratio > 1 where we're under-sampled; < 1 where we're over-sampled.
         ratio = self._target / np.maximum(seen_frac, 1e-8)
         return self._target * (ratio ** self.correction_rate)
 
@@ -158,8 +153,8 @@ class LossAwareSampler(AdaptiveSampler):
     """Oversample classes with high recent loss (hardness-aware reweighting).
 
     Tracks per-class EMA of training loss and reweights sampling by
-    `base_target * (class_ema / global_ema) ** alpha`, clamped to
-    `[min_ratio, max_ratio]` so easy classes don't starve and hard classes
+    ``base_target * (class_ema / global_ema) ** alpha``, clamped to
+    ``[min_ratio, max_ratio]`` so easy classes don't starve and hard classes
     don't get loop-stuck on outliers.
     """
 
@@ -167,7 +162,7 @@ class LossAwareSampler(AdaptiveSampler):
         self,
         class_labels: Sequence[int],
         *,
-        base_target: "str | _TargetFn" = "sqrt",
+        base_target: TargetFn = SQRT_TARGET,
         alpha: float = 0.5,
         ema_decay: float = 0.98,
         min_ratio: float = 0.25,
@@ -176,21 +171,22 @@ class LossAwareSampler(AdaptiveSampler):
         rng_seed: int = 0,
     ):
         super().__init__(class_labels, num_samples=num_samples, rng_seed=rng_seed)
-        assert 0.0 <= ema_decay < 1.0
+        if not 0.0 <= ema_decay < 1.0:
+            raise ValueError("ema_decay must be in [0, 1)")
         self.alpha = float(alpha)
         self.ema_decay = float(ema_decay)
         self.min_ratio = float(min_ratio)
         self.max_ratio = float(max_ratio)
 
-        base = _resolve_target_fn(base_target)(self._class_counts)
+        base = base_target(self._class_counts)
         self._base = base / base.sum()
-        # NaN = "haven't seen this class yet"; treated as ratio=1 at weight time.
         self._ema_loss = np.full(self.num_classes, np.nan, dtype=np.float64)
         self._global_ema_loss: Optional[float] = None
         self._class_to_idx = {c: i for i, c in enumerate(self.unique_classes)}
 
     def update_losses(self, class_ids: Sequence[int], losses: Sequence[float]) -> None:
-        assert len(class_ids) == len(losses)
+        if len(class_ids) != len(losses):
+            raise ValueError("class_ids and losses must have the same length")
         d = self.ema_decay
         for cid, loss in zip(class_ids, losses):
             if not math.isfinite(loss):
@@ -207,7 +203,6 @@ class LossAwareSampler(AdaptiveSampler):
 
     def _class_weights(self) -> np.ndarray:
         global_mean = max(self._global_ema_loss or 1.0, 1e-8)
-        # Unseen classes get ratio=1; seen classes get clamped loss/mean.
         ratios = np.where(
             np.isnan(self._ema_loss),
             1.0,

@@ -129,7 +129,8 @@ class SubCenterArcFaceHead(ArcFaceHead):
         # Skip CosineClassifier.__init__ (it would size the weight wrong);
         # call the grandparent and build our own [C, K, D] weight.
         nn.Module.__init__(self)
-        assert num_sub_centers >= 1
+        if num_sub_centers < 1:
+            raise ValueError("num_sub_centers must be >= 1")
         self.num_classes = num_classes
         self.num_sub_centers = int(num_sub_centers)
         self.weight = nn.Parameter(torch.empty(num_classes, num_sub_centers, feat_dim))

@@ -4,7 +4,7 @@
 # - retrieve information about the hierarchy levels
 # - define a custom sampler for all hierarchy levels
 import copy
-from typing import Callable, Optional, Tuple, Dict, List, Union, NewType
+from typing import Callable, Dict, Iterator, List, NewType, Optional, Tuple, Union
 from torch.utils.data import Dataset, Sampler
 import torch
 
@@ -43,14 +43,12 @@ class HierarchyInformation:
 
     def clone(self) -> "HierarchyInformation":
         """Return a deep-copied hierarchy information object."""
-        leaf_offsets = copy.deepcopy(getattr(self, "leaf_offsets", {}))
-        leaf_centroids = copy.deepcopy(getattr(self, "leaf_centroids", {}))
         return HierarchyInformation(
             copy.deepcopy(self.hierarchy_info),
             copy.deepcopy(self.leaf_counts),
             self.key_length,
-            leaf_offsets,
-            leaf_centroids,
+            copy.deepcopy(self.leaf_offsets),
+            copy.deepcopy(self.leaf_centroids),
         )
 
     def set_leaf_centroids(self, leaf_centroids: Dict[Tuple, Tuple[float, float]]) -> None:
@@ -104,11 +102,10 @@ class HierarchyInformation:
         return copy.deepcopy(self.leaf_counts)
 
     def get_leaf_offset(self, level: LevelPath) -> int:
-        leaf_offsets = getattr(self, "leaf_offsets", {})
         key = tuple(level)
-        if key not in leaf_offsets:
+        if key not in self.leaf_offsets:
             raise KeyError(f"Leaf offset not found for level {key}.")
-        return leaf_offsets[key]
+        return self.leaf_offsets[key]
 
     def get_leaf_index_range(self, level: LevelPath) -> Tuple[int, int]:
         offset = self.get_leaf_offset(level)
@@ -158,28 +155,17 @@ class HierarchyInformation:
         cached = lookup.get(target_value)
         if cached is not None:
             return cached
-
-        # Fallback: rebuild mapping including tuple children if not cached
-        for child in children:
-            if isinstance(child, tuple):
-                continue
-            if int(child) == target_value:
-                new_level = list(level)
-                new_level[none_index] = int(child)
-                result = tuple(new_level)
-                lookup[target_value] = result
-                return LevelPath(result)
-
         raise ValueError(f"No child of level {tuple(level)} matches leaf path {tuple(leaf_path)}.")
 
     def advance_by_child(self, level: LevelPath, child) -> LevelPath:
         """Advance `level` by writing `child` into the first None slot.
 
         Used during free descent (beam search, greedy predict) where we have
-        directly chosen a child rather than following a known leaf. `child`
+        directly chosen a child rather than following a known leaf. ``child``
         may be either:
-          - an int: the value to write into the first None slot of `level`
-          - a tuple: a fully-resolved next level (returned as-is)
+
+        - an int: the value to write into the first None slot of ``level``
+        - a tuple: a fully-resolved next level (returned as-is)
         """
         if isinstance(child, tuple):
             return LevelPath(tuple(child))
@@ -324,42 +310,40 @@ class HierarchicDataset(HierarchyInformation, Dataset):
         """Return a lightweight hierarchy information copy without dataset references."""
         return self.clone()
     
-class KeyDefaultDict(dict):
-    def __init__(self, default_factory):
-        self.default_factory = default_factory
-
-    def __getitem__(self, key):
-        if key not in self:
-            self[key] = self.default_factory(key)
-        return dict.__getitem__(self, key)
-
 class PerLevelSampler(Sampler):
+    """A sampler that adapts other torch samplers to work with hierarchical datasets.
+
+    For each hierarchy level, it creates a separate sampler using the provided
+    factory function. Each time a sample is requested, we traverse down the
+    hierarchy, sampling at each level to get to the next.
     """
-    A sampler that adapts other torch samplers to work with hierarchical datasets.
-    For each hierarchy level, it creates a separate sampler using the provided factory function.
-    Each time a sample is requested, we traverse down the hierarchy, sampling at each level to get to the next.
-    """
-    
-    def __init__(self, dataset: HierarchicDataset, 
-                 sampler_factory: Callable[[List[int]], Sampler],
-                 num_samples: Optional[int] = None,
-                 respect_factory_stopiteration: bool = False):
+
+    def __init__(
+        self,
+        dataset: HierarchicDataset,
+        sampler_factory: Callable[[List[int]], Sampler],
+        num_samples: Optional[int] = None,
+        cycle_on_exhaustion: bool = True,
+    ):
         """
         Args:
             dataset: The HierarchicDataset to sample from. Needed to know hierarchy structure.
             sampler_factory: Factory function to create a sampler for each level.
-                             Called with a list of labels (one per item in the level of the hierarchy),
-                             and should return a Sampler that can sample among those labels.
-            num_samples: Total number of samples to generate per epoch
+                Called with a list of labels (one per item in the level of the
+                hierarchy), and should return a Sampler that can sample among
+                those labels.
+            num_samples: Total number of samples to generate per epoch.
+            cycle_on_exhaustion: when True (default), restart per-level
+                iterators on ``StopIteration``; when False, end the epoch the
+                first time any per-level sampler is exhausted.
         """
         self.dataset = dataset
         self.sampler_factory = sampler_factory
         self.num_samples = num_samples or len(dataset)
-        self.respect_factory_stopiteration = respect_factory_stopiteration
+        self.cycle_on_exhaustion = cycle_on_exhaustion
 
-        # Lazy initialization of samplers using KeyDefaultDict
-        self._level_samplers = KeyDefaultDict(self._create_sampler_for_level)
-        self._sampler_iters = {}  # Cache iterators for each level
+        self._level_samplers: Dict[Tuple, Sampler] = {}
+        self._sampler_iters: Dict[Tuple, Iterator] = {}
     
     def _create_sampler_for_level(self, level_path: Tuple) -> Sampler:
         """Lazily create a sampler for a given level."""
@@ -374,61 +358,53 @@ class PerLevelSampler(Sampler):
             raise ValueError(f"No children found for hierarchy level {level_path}.")
         return self.sampler_factory(children)
     
-    def _get_sampler_iter(self, level_path: Tuple):
-        """Get or create an iterator for a level's sampler."""
+    def _get_or_make_sampler(self, level_path: Tuple) -> Sampler:
+        if level_path not in self._level_samplers:
+            self._level_samplers[level_path] = self._create_sampler_for_level(level_path)
+        return self._level_samplers[level_path]
+
+    def _get_sampler_iter(self, level_path: Tuple) -> Iterator:
         if level_path not in self._sampler_iters:
-            self._sampler_iters[level_path] = iter(self._level_samplers[level_path])
+            self._sampler_iters[level_path] = iter(self._get_or_make_sampler(level_path))
         return self._sampler_iters[level_path]
-    
+
+    def _next_or_cycle(self, level_path: Tuple) -> Optional[int]:
+        """Pull the next index from ``level_path``'s sampler. On exhaustion,
+        cycle (default) or return ``None`` to end the epoch."""
+        try:
+            return next(self._get_sampler_iter(level_path))
+        except StopIteration:
+            if not self.cycle_on_exhaustion:
+                return None
+            self._sampler_iters[level_path] = iter(self._get_or_make_sampler(level_path))
+            try:
+                return next(self._sampler_iters[level_path])
+            except StopIteration:
+                return None
+
     def _sample_hierarchy_path(self, current_level: Tuple) -> Optional[Tuple]:
-        """
-        Sample a complete hierarchy path from current level to bottom.
-        Returns None if all samplers are exhausted (when respect_factory_stopiteration is True).
-        """
+        """Sample a complete hierarchy path from ``current_level`` to a leaf."""
         for _ in range(self.dataset.key_length):
             none_index = current_level.index(None)
             children = self.dataset.hierarchy_info[current_level]
-            sampler_iter = self._get_sampler_iter(current_level)
-            
-            try:
-                child_idx = next(sampler_iter)
-            except StopIteration:
-                if self.respect_factory_stopiteration:
-                    return None
-                
-                # Recreate iterator and try again
-                self._sampler_iters[current_level] = iter(self._level_samplers[current_level])
-                child_idx = next(self._sampler_iters[current_level])
-            
-            # update current_level
+            child_idx = self._next_or_cycle(current_level)
+            if child_idx is None:
+                return None
             new_level = list(current_level)
             new_level[none_index] = children[child_idx]
             current_level = tuple(new_level)
-        
         return current_level
-    
+
     def __iter__(self):
-        """Generate num_samples by sampling through the hierarchy."""
         top_level = tuple([None] * self.dataset.key_length)
-        
         for _ in range(self.num_samples):
             leaf_path = self._sample_hierarchy_path(top_level)
-            
             if leaf_path is None:
-                # All samplers exhausted (only when respect_factory_stopiteration is True)
                 break
-            
-            # Use the sampler for the leaf level to sample an index
-            leaf_sampler_iter = self._get_sampler_iter(leaf_path)
-            
-            try:
-                yield next(leaf_sampler_iter)
-            except StopIteration:
-                if self.respect_factory_stopiteration:
-                    break
-                # Recreate iterator and try again
-                self._sampler_iters[leaf_path] = iter(self._level_samplers[leaf_path])
-                yield next(self._sampler_iters[leaf_path])
+            idx = self._next_or_cycle(leaf_path)
+            if idx is None:
+                break
+            yield idx
     
     def __len__(self):
         """Return the number of samples per epoch."""

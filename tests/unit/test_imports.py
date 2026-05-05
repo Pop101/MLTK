@@ -9,13 +9,14 @@ def test_top_level_exports_are_real():
 
 
 def test_subpackages_import():
-    for pkg in ["learning", "building_blocks", "models", "hierarchical"]:
+    for pkg in ["learning", "building_blocks", "models", "data", "hierarchical"]:
         importlib.import_module(f"mltk.{pkg}")
 
 
 def test_submodules_import():
     modnames = [
-        "learning.base_classifier",
+        "learning.abstract_model",
+        "learning.hyperparameter_optimizer",
         "learning.kldivlosssoftmax",
         "learning.schedulers",
         "learning.samplers",
@@ -27,9 +28,14 @@ def test_submodules_import():
         "building_blocks.skipattnmlp",
         "models.supermodel",
         "models.model_factory",
-        "models.backbones",
+        "data.abstract_dataset",
+        "data.cache",
+        "data.disk_cached_dataset",
+        "data.map_dataset",
+        "data.replicated_dataset",
         "hierarchical.hierarchic_dataset",
         "hierarchical.hierarchic_inference",
+        "devices",
     ]
     for m in modnames:
         importlib.import_module(f"mltk.{m}")

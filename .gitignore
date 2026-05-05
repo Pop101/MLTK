@@ -6,3 +6,7 @@ dist/
 build/
 *.pth
 mnist_data/
+
+# Sphinx build output + generated autosummary stubs
+docs/_build/
+docs/api/_autosummary/

@@ -1,6 +1,12 @@
 """LR schedulers and weight-averaging utilities.
 
-Framework-reusable; none of these know anything about geolocation.
+Framework-reusable; none of these know anything about a specific task.
+
+The schedulers expose ``interval`` (and ``monitor`` where applicable) so
+``AbstractModel._scheduler_config`` can build a Lightning scheduler config
+without per-class branches. Only mutable state is round-tripped via
+``state_dict`` / ``load_state_dict``; configuration (``factor``, ``min_lr``,
+``warmup_steps``…) is owned by the constructor.
 """
 from __future__ import annotations
 
@@ -13,13 +19,16 @@ import torch
 import torch.nn as nn
 
 
-class SmoothReduceLROnPlateau:
+class SmoothReduceLROnPlateau(torch.optim.lr_scheduler.LRScheduler):
     """Reduce LR when smoothed recent loss exceeds smoothed historical loss.
 
     Plateau detector that avoids fighting noise: compares a short-window
     recent mean against the longer-window historical mean, multiplied by
-    `reduction_threshold`. Good general-purpose fallback.
+    ``reduction_threshold``.
     """
+
+    interval = "epoch"
+    monitor = "val_loss"
 
     def __init__(
         self,
@@ -32,7 +41,6 @@ class SmoothReduceLROnPlateau:
         min_lr: float = 1e-6,
         verbose: bool = False,
     ):
-        self.optimizer = optimizer
         self.smoothing_window = smoothing_window
         self.historical_window = historical_window
         self.reduction_threshold = reduction_threshold
@@ -41,23 +49,30 @@ class SmoothReduceLROnPlateau:
         self.min_lr = min_lr
         self.losses: List[float] = []
         self.verbose = verbose
-        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+        super().__init__(optimizer)
 
     def state_dict(self) -> Dict:
-        return {k: v for k, v in self.__dict__.items() if k != 'optimizer'}
+        state = super().state_dict()
+        state["losses"] = list(self.losses)
+        return state
 
     def load_state_dict(self, state_dict: Dict) -> None:
-        self.__dict__.update(state_dict)
+        state = dict(state_dict)
+        self.losses = list(state.pop("losses", []))
+        super().load_state_dict(state)
 
-    def step(self, metrics: float) -> None:
+    def step(self, metrics: float | None = None) -> None:
+        if metrics is None:
+            self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+            return
         self.losses.append(metrics)
         while len(self.losses) > self.historical_window:
             self.losses.pop(0)
         if len(self.losses) < self.historical_window:
             return
 
-        recent_avg = np.mean(self.losses[-self.smoothing_window:])
-        historical_avg = np.mean(self.losses[:-self.smoothing_window])
+        recent_avg = float(np.mean(self.losses[-self.smoothing_window:]))
+        historical_avg = float(np.mean(self.losses[:-self.smoothing_window]))
 
         if recent_avg > historical_avg * self.reduction_threshold:
             if self.verbose:
@@ -68,20 +83,24 @@ class SmoothReduceLROnPlateau:
             for i, group in enumerate(self.optimizer.param_groups):
                 group['lr'] = max(group['lr'] * self.factor, self.min_lr)
                 if self.verbose:
-                    new_lr = group['lr']
-                    print(f'Reducing learning rate of group {i} to {new_lr:.4e}.')
+                    print(f'Reducing learning rate of group {i} to {group["lr"]:.4e}.')
             if self.cooldown > 0:
                 self.losses = self.losses[:-self.cooldown]
 
         self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
 
+    def get_lr(self) -> List[float]:
+        return [group['lr'] for group in self.optimizer.param_groups]
 
-class CosineWarmupScheduler:
-    """Linear warmup → cosine decay to `min_lr_ratio * base_lr`.
+
+class CosineWarmupScheduler(torch.optim.lr_scheduler.LRScheduler):
+    """Linear warmup → cosine decay to ``min_lr_ratio * base_lr``.
 
     Step once per training batch. Each param group gets the same multiplier
-    applied to its own `base_lr` (snapshotted at construction).
+    applied to its own ``base_lr`` (snapshotted at construction).
     """
+
+    interval = "step"
 
     def __init__(
         self,
@@ -91,14 +110,14 @@ class CosineWarmupScheduler:
         total_steps: int,
         min_lr_ratio: float = 0.01,
     ):
-        assert 0 <= warmup_steps < total_steps
-        assert 0.0 <= min_lr_ratio <= 1.0
-        self.optimizer = optimizer
+        if not 0 <= warmup_steps < total_steps:
+            raise ValueError("warmup_steps must satisfy 0 <= warmup_steps < total_steps")
+        if not 0.0 <= min_lr_ratio <= 1.0:
+            raise ValueError("min_lr_ratio must be in [0, 1]")
         self.warmup_steps = int(warmup_steps)
         self.total_steps = int(total_steps)
         self.min_lr_ratio = float(min_lr_ratio)
-        self._step_count = 0
-        self._base_lrs: List[float] = [float(g['lr']) for g in self.optimizer.param_groups]
+        super().__init__(optimizer)
 
     def _multiplier(self, step: int) -> float:
         if step < self.warmup_steps:
@@ -108,37 +127,18 @@ class CosineWarmupScheduler:
         progress = (step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
         return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
-    def step(self, metric=None) -> None:
-        del metric  # accepted for protocol compatibility with plateau schedulers
-        m = self._multiplier(self._step_count)
-        for base, group in zip(self._base_lrs, self.optimizer.param_groups):
-            group['lr'] = base * m
-        self._step_count += 1
-
-    def state_dict(self) -> Dict:
-        return {
-            "warmup_steps": self.warmup_steps,
-            "total_steps": self.total_steps,
-            "min_lr_ratio": self.min_lr_ratio,
-            "_step_count": self._step_count,
-            "_base_lrs": list(self._base_lrs),
-        }
-
-    def load_state_dict(self, state_dict: Dict) -> None:
-        self.warmup_steps = int(state_dict["warmup_steps"])
-        self.total_steps = int(state_dict["total_steps"])
-        self.min_lr_ratio = float(state_dict["min_lr_ratio"])
-        self._step_count = int(state_dict["_step_count"])
-        self._base_lrs = [float(x) for x in state_dict["_base_lrs"]]
+    def get_lr(self) -> List[float]:
+        m = self._multiplier(max(0, self.last_epoch))
+        return [base_lr * m for base_lr in self.base_lrs]
 
 
 class EMAWeightTracker:
     """Exponential moving average of a parameter iterable.
 
-    Holds a parallel shadow copy of each parameter. `update(params)` after
-    each optimizer step refreshes the shadow. `swap_into(params)` is a
-    context manager that temporarily replaces `params` with the shadow
-    values for the duration of a `with` block (e.g. an eval call).
+    Holds a parallel shadow copy of each parameter. ``update(params)`` after
+    each optimizer step refreshes the shadow. ``swap_into(params)`` is a
+    context manager that temporarily replaces ``params`` with the shadow
+    values for the duration of a ``with`` block (e.g. an eval call).
 
     Matches or exceeds SWA on test accuracy at zero training cost
     (arxiv:2411.18704). Typical decay 0.999.
@@ -151,7 +151,8 @@ class EMAWeightTracker:
         decay: float = 0.999,
         warmup_steps: int = 1000,
     ):
-        assert 0.0 < decay < 1.0
+        if not 0.0 < decay < 1.0:
+            raise ValueError("decay must be in (0, 1)")
         self.decay = float(decay)
         self.warmup_steps = int(warmup_steps)
         self._num_updates = 0
@@ -166,7 +167,6 @@ class EMAWeightTracker:
 
     @torch.no_grad()
     def update(self, parameters: Iterable[nn.Parameter]) -> None:
-        """Call after optimizer.step() to refresh the shadow from live params."""
         d = self._effective_decay()
         for shadow, param in zip(self._shadow, parameters):
             shadow.mul_(d).add_(param.detach().to(dtype=torch.float32), alpha=1.0 - d)
@@ -174,8 +174,8 @@ class EMAWeightTracker:
 
     @contextmanager
     def swap_into(self, parameters: Iterable[nn.Parameter]) -> Iterator[None]:
-        """Temporarily replace `parameters` with EMA copies for the duration
-        of a `with` block, then restore them on exit."""
+        """Temporarily replace ``parameters`` with EMA copies for the duration
+        of a ``with`` block, then restore them on exit."""
         params = list(parameters)
         backup = [p.detach().clone() for p in params]
         with torch.no_grad():
@@ -190,14 +190,10 @@ class EMAWeightTracker:
 
     def state_dict(self) -> Dict:
         return {
-            "decay": self.decay,
-            "warmup_steps": self.warmup_steps,
             "_num_updates": self._num_updates,
             "_shadow": [s.detach().cpu() for s in self._shadow],
         }
 
     def load_state_dict(self, state_dict: Dict) -> None:
-        self.decay = float(state_dict["decay"])
-        self.warmup_steps = int(state_dict["warmup_steps"])
         self._num_updates = int(state_dict["_num_updates"])
         self._shadow = [t.clone() for t in state_dict["_shadow"]]

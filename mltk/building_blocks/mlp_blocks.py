@@ -47,7 +47,8 @@ class DropPath(nn.Module):
 
     def __init__(self, drop_prob: float = 0.0):
         super().__init__()
-        assert 0.0 <= drop_prob < 1.0
+        if not 0.0 <= drop_prob < 1.0:
+            raise ValueError("drop_prob must be in [0, 1)")
         self.drop_prob = float(drop_prob)
 
     def extra_repr(self) -> str:
