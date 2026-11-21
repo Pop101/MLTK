@@ -1,11 +1,23 @@
 # MLTK
 
-Small PyTorch toolkit of building blocks on top of [PyTorch
-Lightning](https://lightning.ai/). `AbstractModel` is a `LightningModule`;
-the rest of the toolkit (datasets, schedulers, `SuperModel`,
-hyperparameter search) sits on top.
+Reusable PyTorch blocks for experiments that outgrow a single training script. MLTK groups model heads, training utilities, datasets and hierarchical classifiers behind a small set of composable interfaces.
 
-Train with `lightning.Trainer`. Restore with `cls.load_from_checkpoint`.
+![MLTK cover: a network of connected model layers](.github/images/readme-hero.svg)
+
+## Table of Contents
+
+- [Technologies](#technologies)
+- [Layout](#layout)
+- [Install](#install)
+- [Docs](#docs)
+- [Quick start](#quick-start)
+- [Tests](#tests)
+
+## Technologies
+
+- [PyTorch](https://pytorch.org/) provides tensor operations and reusable modules.
+- [Lightning](https://lightning.ai/docs/pytorch/stable/) supplies the training lifecycle for `AbstractModel`.
+- [Sphinx](https://www.sphinx-doc.org/) builds the API documentation.
 
 ## Layout
 
